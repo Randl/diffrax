@@ -75,9 +75,6 @@ def test_basic(solver, t_dtype, y_dtype, treedef, stepsize_controller, getkey):
         def f(t, y, args):
             return jtu.tree_map(lambda _y: operator.mul(-1j, _y), y)
 
-        if isinstance(solver, diffrax.AbstractImplicitSolver):
-            return
-
     else:
 
         def f(t, y, args):
@@ -580,3 +577,85 @@ def test_grad_implicit_solve(solver):
     val_eps = f(1.0 + eps)
     numerical_grads = (val_eps - val) / eps
     assert shaped_allclose(grads, numerical_grads)
+
+
+@pytest.mark.parametrize(
+    "solver,t_dtype,dt,y_dtype,stepsize_controller",
+    _all_pairs(
+        dict(
+            default=diffrax.Euler(),
+            opts=(
+                diffrax.LeapfrogMidpoint(),
+                diffrax.ReversibleHeun(),
+                diffrax.Tsit5(),
+                diffrax.ImplicitEuler(
+                    nonlinear_solver=diffrax.NewtonNonlinearSolver(rtol=1e-3, atol=1e-6)
+                ),
+                diffrax.Kvaerno3(
+                    nonlinear_solver=diffrax.NewtonNonlinearSolver(rtol=1e-3, atol=1e-6)
+                ),
+            ),
+        ),
+        dict(default=jnp.float32, opts=(int, float, jnp.int32)),
+        dict(default=0.01, opts=(None,)),
+        dict(default=jnp.float32, opts=(jnp.complex64,)),
+        dict(
+            default=diffrax.ConstantStepSize(),
+            opts=(diffrax.PIDController(rtol=1e-3, atol=1e-6),),
+        ),
+    ),
+)
+def test_basic_grad(solver, t_dtype, dt, y_dtype, stepsize_controller, getkey):
+    if not isinstance(solver, diffrax.AbstractAdaptiveSolver) and isinstance(
+        stepsize_controller, diffrax.PIDController
+    ):
+        return
+
+    if dt is None and not isinstance(stepsize_controller, diffrax.PIDController):
+        return
+
+    if jnp.iscomplexobj(y_dtype):
+
+        def f(t, y, args):
+            return jtu.tree_map(lambda _y: operator.mul(-1j, _y), y)
+
+    else:
+
+        def f(t, y, args):
+            return jtu.tree_map(operator.neg, y)
+
+    if t_dtype is int:
+        t0 = 0
+        t1 = 1
+        dt0 = dt
+    elif t_dtype is float:
+        t0 = 0.0
+        t1 = 1.0
+        dt0 = dt
+    elif t_dtype is jnp.int32:
+        t0 = jnp.array(0)
+        t1 = jnp.array(1)
+        dt0 = jnp.array(dt) if dt is not None else None
+    elif t_dtype is jnp.float32:
+        t0 = jnp.array(0.0)
+        t1 = jnp.array(1.0)
+        dt0 = jnp.array(dt) if dt is not None else None
+    else:
+        raise ValueError
+
+    def fg(y0):
+        sol = diffrax.diffeqsolve(
+            diffrax.ODETerm(f),
+            solver,
+            t0,
+            t1,
+            dt0,
+            y0,
+            stepsize_controller=stepsize_controller,
+        )
+        return sol.ys[-1]
+
+    from jax.test_util import check_grads
+
+    y0 = jrandom.normal(getkey(), (1, 2), dtype=y_dtype)
+    check_grads(fg, (y0), order=2, rtol=1e-1, atol=1e-1)
